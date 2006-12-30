@@ -34,12 +34,15 @@
 
 #include "ns.h"
 
-#define BUFSIZE               512    /* Internal buffer size for read/write */
-#define TIMEOUT               2      /* For how long to wait for responses */
+#define BUFSIZE               512        /* Internal buffer size for read/write */
+#define TIMEOUT               2          /* For how long to wait for responses */
+#define DEADTIME              5          /* Period to ping dead servers */
+
 #define PORT                  11211
 
-#define MC_SERVER_LIVE        0      /* Server is alive and responding to requests */
-#define MC_SERVER_DEAD        1      /* Server is not responding to requests */
+#define MC_SERVER_LIVE        0          /* Server is alive and responding to requests */
+#define MC_SERVER_DEAD        1          /* Server is not responding to requests */
+#define MC_SERVER_DELETED     2          /* Server is not used anymore */
 
 typedef struct mc_conn_t
 {
@@ -51,35 +54,33 @@ typedef struct mc_conn_t
 
 typedef struct mc_server_t
 {
-    char *host;                          /*  Hostname of this Server */
-    int port;                            /*  Port of this Server */
+    char *host;                          /*  Hostname of this server */
+    int port;                            /*  Port of this server */
     int status;                          /*  Server status */
     int timeout;
     mc_conn_t *conns;                    /*  List of actual client connections */
     Ns_Mutex lock;
-    time_t btime;
+    time_t deadtime;
 } mc_server_t;
 
 typedef struct mc_t
 {
-    uint16_t nalloc;                      /* Number of Servers Allocated */
-    uint16_t ntotal;                      /* Number of Servers Added */
-    mc_server_t **servers;                /* Array of Servers */
-    Ns_Mutex lock;
+    uint16_t nalloc;                      /* Number of servers allocated */
+    uint16_t ntotal;                      /* Number of servers added */
+    mc_server_t **servers;                /* Array of servers */
+    Ns_RWLock lock;
 } mc_t;
 
 static uint32_t mc_hash(const char* data, uint32_t data_len);
 static mc_t *mc_create(uint16_t max_servers, uint32_t flags);
-static mc_server_t *mc_server_create(const char *host, int port, uint32_t timeout);
-static mc_server_t * mc_server_find(mc_t *mc, const char* host, int port);
+static mc_server_t *mc_server_create(char *host, int port, uint32_t timeout);
+static mc_server_t * mc_server_find(mc_t *mc, char* host, int port);
 static int mc_server_add(mc_t *mc, mc_server_t *ms);
-static int mc_get(mc_t *mc, const char* key, char **data, size_t *length, uint16_t *flags);
-static int mc_set(mc_t *mc, const char* key, char *data, const uint32_t data_size,  uint32_t timeout, uint16_t flags);
-static int mc_add(mc_t *mc, const char* key, char *data, const uint32_t data_size, uint32_t timeout, uint16_t flags);
-static int mc_replace(mc_t *mc, const char* key, char *data, const uint32_t data_size,  uint32_t timeout, uint16_t flags);
-static int mc_delete(mc_t *mc, const char* key, uint32_t timeout);
-static int mc_incr(mc_t *mc, const char* key, int32_t n, uint32_t *new_value);
-static int mc_decr(mc_t *mc, const char* key, int32_t n, uint32_t *new_value);
+static void mc_server_delete(mc_t *mc, mc_server_t *ms);
+static int mc_get(mc_t *mc, char* key, char **data, size_t *length, uint16_t *flags);
+static int mc_set(mc_t *mc, char* cmd, char* key, char *data, uint32_t data_size, uint32_t timeout, uint16_t flags);
+static int mc_delete(mc_t *mc, char* key, uint32_t timeout);
+static int mc_incr(mc_t *mc, char *cmd, char* key, int32_t n, uint32_t *new_value);
 static int mc_version(mc_t *mc, mc_server_t *ms,  char **data);
 static int MCInterpInit(Tcl_Interp * interp, void *arg);
 static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST objv[]);
@@ -162,7 +163,6 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
     int i;
     char *key, *path;
     mc_t *mc;
-    mc_server_t *ms;
     Ns_Set *set;
 
     mc = mc_create(16, 0);
@@ -173,8 +173,7 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
         key = Ns_SetKey(set, i);
         if (!strcasecmp(key, "server")) {
             key = Ns_SetValue(set, i);
-            ms = mc_server_create(key, 0, 0);
-            mc_server_add(mc, ms);
+            mc_server_add(mc, mc_server_create(key, 0, 0));
             Ns_Log(Notice, "nsmemcache: added %s", key);
         }
     }
@@ -199,10 +198,12 @@ static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST 
 
     enum {
         cmdGet, cmdAdd, cmdSet, cmdReplace, cmdDelete, cmdIncr, cmdDecr, cmdVersion,
+        cmdServer
     };
 
     static CONST char *sCmd[] = {
         "get", "add", "set", "replace", "delete", "incr", "decr", "version",
+        "server",
         0
     };
 
@@ -215,6 +216,19 @@ static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST 
     }
 
     switch (cmd) {
+    case cmdServer:
+       if (objc < 4) {
+           Tcl_WrongNumArgs(interp, 2, objv, "cmd server");
+           return TCL_ERROR;
+       }
+       if (!strcmp(Tcl_GetString(objv[2]), "add")) {
+           mc_server_add(mc, mc_server_create(Tcl_GetString(objv[3]), 0, 0));
+       } else
+       if (!strcmp(Tcl_GetString(objv[2]), "delete")) {
+           mc_server_delete(mc, mc_server_find(mc, Tcl_GetString(objv[3]), 0));
+       }
+       break;
+
     case cmdGet:
        if (objc < 4) {
            Tcl_WrongNumArgs(interp, 2, objv, "key dataVar ?lengthVar? ?flagsVar?");
@@ -251,13 +265,13 @@ static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST 
        }
        switch (cmd) {
        case cmdAdd:
-           cmd = mc_add(mc, key, data, size, expires, flags);
+           cmd = mc_set(mc, "add", key, data, size, expires, flags);
            break;
        case cmdSet:
-           cmd = mc_set(mc, key, data, size, expires, flags);
+           cmd = mc_set(mc, "set", key, data, size, expires, flags);
            break;
        case cmdReplace:
-           cmd = mc_replace(mc, key, data, size, expires, flags);
+           cmd = mc_set(mc, "replace", key, data, size, expires, flags);
            break;
        }
        Tcl_SetObjResult(interp, Tcl_NewIntObj(cmd));
@@ -286,10 +300,10 @@ static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST 
        size = atoi(Tcl_GetString(objv[3]));
        switch (cmd) {
        case cmdIncr:
-           cmd = mc_incr(mc, key, size, &size);
+           cmd = mc_incr(mc, "incr", key, size, &size);
            break;
        case cmdDecr:
-           cmd = mc_decr(mc, key, size, &size);
+           cmd = mc_incr(mc, "decr", key, size, &size);
            break;
        }
        if (cmd == 1 && objc > 4) {
@@ -416,7 +430,7 @@ static int mc_conn_read(mc_conn_t * conn, int len, int reset, char **line)
     return nread;
 }
 
-static mc_server_t *mc_server_create(const char* host, int port, uint32_t timeout)
+static mc_server_t *mc_server_create(char* host, int port, uint32_t timeout)
 {
     mc_server_t *server = ns_calloc(1, sizeof(mc_server_t));
     server->host = ns_strdup(host);
@@ -430,71 +444,99 @@ static void mc_server_dead(mc_t * mc, mc_server_t * ms)
 {
     Ns_MutexLock(&ms->lock);
     ms->status = MC_SERVER_DEAD;
-    ms->btime = time(0);
+    ms->deadtime = time(0);
     Ns_MutexUnlock(&ms->lock);
 }
 
 static int mc_server_add(mc_t *mc, mc_server_t *ms)
 {
+    if (ms == NULL) {
+        return -1;
+    }
+    Ns_RWLockWrLock(&mc->lock);
     if (mc->ntotal >= mc->nalloc) {
-        return NS_ERROR;
+        mc->nalloc += 8;
+        mc->servers = ns_realloc(mc->servers, mc->nalloc);
     }
     mc->servers[mc->ntotal++] = ms;
-    return NS_OK;
+    Ns_RWLockUnlock(&mc->lock);
+    return 0;
+}
+
+static void mc_server_delete(mc_t *mc, mc_server_t *ms)
+{
+    int i;
+    mc_conn_t *next;
+
+    if (ms == NULL) {
+        return;
+    }
+    Ns_RWLockWrLock(&mc->lock);
+    for (i = 0; i < mc->ntotal; i++) {
+        if (mc->servers[i] == ms) {
+            Ns_MutexLock(&ms->lock);
+            ms->status = MC_SERVER_DELETED;
+            while (ms->conns) {
+                next = ms->conns->next;
+                mc_conn_free(ms->conns);
+                ms->conns = next;
+            }
+            Ns_MutexUnlock(&ms->lock);
+            break;
+        }
+    }
+    Ns_RWLockUnlock(&mc->lock);
 }
 
 static mc_server_t * mc_server_find_hash(mc_t *mc, const uint32_t hash)
 {
-    mc_server_t *ms = NULL;
-    uint32_t h = hash;
-    uint32_t i = 0;
-    time_t curtime = 0;
+    mc_server_t *ms, *srv = NULL;
+    uint32_t h = hash, i = 0;
+    time_t now = time(0);
 
-    if (mc->ntotal == 0) {
-        return NULL;
-    }
-
-    do {
+    Ns_RWLockRdLock(&mc->lock);
+    while (srv == NULL && i < mc->ntotal) {
         ms = mc->servers[h % mc->ntotal];
-        if (ms->status == MC_SERVER_LIVE) {
-            break;
-        } else {
-            if (curtime == 0) {
-                curtime = time(0);
-            }
-            Ns_MutexLock(&ms->lock);
-            /* Try the the dead server, every 5 seconds */
-            if (curtime - ms->btime > 5) {
-                if (mc_version(mc, ms, NULL) == 1) {
-                    ms->btime = curtime;
-                    ms->status = MC_SERVER_LIVE;
-                    Ns_MutexUnlock(&ms->lock);
-                    break;
-                }
-            }
-            Ns_MutexUnlock(&ms->lock);
+        Ns_MutexLock(&ms->lock);
+        switch (ms->status) {
+        case MC_SERVER_LIVE:
+           srv = ms;
+           break;
+
+        case MC_SERVER_DEAD:
+           /* Try the the dead server */
+           if (now - ms->deadtime > DEADTIME) {
+               if (mc_version(mc, ms, NULL) == 1) {
+                   ms->status = MC_SERVER_LIVE;
+                   srv = ms;
+                   break;
+               }
+           }
+           break;
         }
+        Ns_MutexUnlock(&ms->lock);
         h++;
         i++;
-    } while(i < mc->ntotal);
-
-    if (i == mc->ntotal) {
-        ms = NULL;
     }
-    return ms;
+    Ns_RWLockUnlock(&mc->lock);
+    return srv;
 }
 
-static mc_server_t * mc_server_find(mc_t *mc, const char* host, int port)
+static mc_server_t * mc_server_find(mc_t *mc, char* host, int port)
 {
     int i;
+    mc_server_t *ms = NULL;
 
+    Ns_RWLockRdLock(&mc->lock);
     for (i = 0; i < mc->ntotal; i++) {
         if (strcmp(mc->servers[i]->host, host) == 0
             && mc->servers[i]->port == port) {
-            return mc->servers[i];
+            ms = mc->servers[i];
+            break;
         }
     }
-    return NULL;
+    Ns_RWLockUnlock(&mc->lock);
+    return ms;
 }
 
 static mc_t *mc_create(uint16_t max_servers, uint32_t flags)
@@ -506,7 +548,7 @@ static mc_t *mc_create(uint16_t max_servers, uint32_t flags)
     return mc;
 }
 
-static int storage_cmd_write(mc_t *mc, char* cmd, const char* key, char *data, uint32_t data_size, uint32_t timeout, uint16_t flags)
+static int mc_set(mc_t *mc, char* cmd, char* key, char *data, uint32_t data_size, uint32_t timeout, uint16_t flags)
 {
     int rc;
     char *line;
@@ -552,7 +594,7 @@ static int storage_cmd_write(mc_t *mc, char* cmd, const char* key, char *data, u
     if (rc <= 0) {
         mc_conn_free(conn);
         mc_server_dead(mc, ms);
-        return rc;
+        return -1;
     }
     mc_conn_put(conn);
 
@@ -566,22 +608,7 @@ static int storage_cmd_write(mc_t *mc, char* cmd, const char* key, char *data, u
     }
 }
 
-static int mc_set(mc_t *mc, const char* key, char *data, const uint32_t data_size, uint32_t timeout, uint16_t flags)
-{
-    return storage_cmd_write(mc, "set", key, data, data_size, timeout, flags);
-}
-
-static int mc_add(mc_t *mc, const char* key, char *data, const uint32_t data_size, uint32_t timeout, uint16_t flags)
-{
-    return storage_cmd_write(mc, "add", key, data, data_size, timeout, flags);
-}
-
-static int mc_replace(mc_t *mc, const char* key, char *data, const uint32_t data_size, uint32_t timeout, uint16_t flags)
-{
-    return storage_cmd_write(mc, "replace", key, data, data_size, timeout, flags);
-}
-
-static int mc_get(mc_t *mc, const char* key, char **data, size_t *length, uint16_t *flags)
+static int mc_get(mc_t *mc, char* key, char **data, size_t *length, uint16_t *flags)
 {
     int rc;
     char *line, *ptr;
@@ -621,7 +648,7 @@ static int mc_get(mc_t *mc, const char* key, char **data, size_t *length, uint16
     if (rc <= 0) {
         mc_conn_free(conn);
         mc_server_dead(mc, ms);
-        return rc;
+        return -1;
     }
     if (strncmp(conn->ds.string, "VALUE ", 6) == 0) {
         ptr = ns_strtok(conn->ds.string," ");
@@ -682,7 +709,7 @@ static int mc_get(mc_t *mc, const char* key, char **data, size_t *length, uint16
     }
 }
 
-static int mc_delete(mc_t *mc, const char* key, uint32_t timeout)
+static int mc_delete(mc_t *mc, char* key, uint32_t timeout)
 {
     int rc;
     char *line;
@@ -719,7 +746,7 @@ static int mc_delete(mc_t *mc, const char* key, uint32_t timeout)
     if (rc <= 0) {
         mc_conn_free(conn);
         mc_server_dead(mc, ms);
-        return rc;
+        return -1;
     }
     mc_conn_put(conn);
 
@@ -733,7 +760,7 @@ static int mc_delete(mc_t *mc, const char* key, uint32_t timeout)
     }
 }
 
-static int num_cmd_write(mc_t *mc, char* cmd, const char* key, const int32_t inc, uint32_t *new_value)
+static int mc_incr(mc_t *mc, char* cmd, char* key, const int32_t inc, uint32_t *new_value)
 {
     int rc;
     char *line;
@@ -772,7 +799,7 @@ static int num_cmd_write(mc_t *mc, char* cmd, const char* key, const int32_t inc
     if (rc <= 0) {
         mc_conn_free(conn);
         mc_server_dead(mc, ms);
-        return rc;
+        return -1;
     }
     mc_conn_put(conn);
 
@@ -787,16 +814,6 @@ static int num_cmd_write(mc_t *mc, char* cmd, const char* key, const int32_t inc
         }
         return 1;
     }
-}
-
-static int mc_incr(mc_t *mc, const char* key, int32_t inc, uint32_t *new_value)
-{
-    return num_cmd_write(mc, "incr", key, inc, new_value);
-}
-
-static int mc_decr(mc_t *mc, const char* key, int32_t inc, uint32_t *new_value)
-{
-    return num_cmd_write(mc, "decr", key, inc, new_value);
 }
 
 static int mc_version(mc_t *mc, mc_server_t *ms, char **data)
@@ -831,7 +848,7 @@ static int mc_version(mc_t *mc, mc_server_t *ms, char **data)
     if (rc <= 0) {
         mc_conn_free(conn);
         mc_server_dead(mc, ms);
-        return rc;
+        return -1;
     }
     mc_conn_put(conn);
 
