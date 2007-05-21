@@ -79,6 +79,8 @@ static int mc_server_add(mc_t *mc, mc_server_t *ms);
 static void mc_server_delete(mc_t *mc, mc_server_t *ms);
 static int mc_get(mc_t *mc, char* key, char **data, size_t *length, uint16_t *flags);
 static int mc_set(mc_t *mc, char* cmd, char* key, char *data, uint32_t data_size, uint32_t timeout, uint16_t flags);
+static int mc_areplace(mc_t *mc, char* key, char *data, uint32_t data_size, uint32_t timeout, uint16_t flags,
+                       char **data2, size_t *length2, uint16_t *flags2);
 static int mc_delete(mc_t *mc, char* key, uint32_t timeout);
 static int mc_incr(mc_t *mc, char *cmd, char* key, int32_t n, uint32_t *new_value);
 static int mc_version(mc_t *mc, mc_server_t *ms,  char **data);
@@ -197,12 +199,12 @@ static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST 
     int cmd;
 
     enum {
-        cmdGet, cmdAdd, cmdSet, cmdReplace, cmdDelete, cmdIncr, cmdDecr, cmdVersion,
+        cmdGet, cmdAdd, cmdAppend, cmdSet, cmdReplace, cmdAReplace, cmdDelete, cmdIncr, cmdDecr, cmdVersion,
         cmdServer
     };
 
     static CONST char *sCmd[] = {
-        "get", "add", "set", "replace", "delete", "incr", "decr", "version",
+        "get", "add", "append", "set", "replace", "areplace", "delete", "incr", "decr", "version",
         "server",
         0
     };
@@ -250,6 +252,7 @@ static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST 
 
     case cmdAdd:
     case cmdSet:
+    case cmdAppend:
     case cmdReplace:
        if (objc < 4) {
            Tcl_WrongNumArgs(interp, 2, objv, "key value ?expires? ?flags?");
@@ -267,6 +270,9 @@ static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST 
        case cmdAdd:
            cmd = mc_set(mc, "add", key, data, size, expires, flags);
            break;
+       case cmdAppend:
+           cmd = mc_set(mc, "append", key, data, size, expires, flags);
+           break;
        case cmdSet:
            cmd = mc_set(mc, "set", key, data, size, expires, flags);
            break;
@@ -276,6 +282,45 @@ static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST 
        }
        Tcl_SetObjResult(interp, Tcl_NewIntObj(cmd));
        break;
+
+    case cmdAReplace: {
+       char *data2, *outVar = NULL, *outSize = NULL, *outFlags = NULL;
+       u_int32_t size2 = 0;
+       u_int16_t flags2 = 0;
+
+       Ns_ObjvSpec opts[] = {
+          {"-expires",  Ns_ObjvInt,    &expires, NULL},
+          {"-flags",    Ns_ObjvInt,    &flags,   NULL},
+          {"-outsize",  Ns_ObjvString, &outSize,  NULL},
+          {"-outflags", Ns_ObjvString, &outFlags, NULL},
+          {"-outvar",   Ns_ObjvString, &outVar,   NULL},
+          {"--",        Ns_ObjvBreak,  NULL,     NULL},
+          {NULL, NULL, NULL, NULL}
+       };
+       Ns_ObjvSpec args[] = {
+          {"key",     Ns_ObjvString,  &key,     NULL},
+          {"value",   Ns_ObjvString,  &data,    &size},
+          {NULL, NULL, NULL, NULL}
+       };
+
+       if (Ns_ParseObjv(opts, args, interp, 2, objc, objv) != NS_OK) {
+           return TCL_ERROR;
+       }
+       cmd = mc_areplace(mc, key, data, size, expires, flags, &data2, &size2, &flags2);
+       if (cmd == 1) {
+           if (outVar != NULL) {
+               Tcl_SetVar2Ex(interp, outVar, NULL, Tcl_NewByteArrayObj((uint8_t*)data2, size2), 0);
+           }
+           if (outSize != NULL) {
+             Tcl_SetVar2Ex(interp, outSize, NULL, Tcl_NewLongObj(size2), 0);
+           }
+           if (outFlags != NULL) {
+             Tcl_SetVar2Ex(interp, outFlags, NULL, Tcl_NewIntObj(flags2), 0);
+           }
+       }
+       Tcl_SetObjResult(interp, Tcl_NewIntObj(cmd));
+       break;
+    }
 
     case cmdDelete:
        if (objc < 3) {
@@ -615,7 +660,7 @@ static int mc_get(mc_t *mc, char* key, char **data, size_t *length, uint16_t *fl
     mc_server_t* ms;
     mc_conn_t* conn;
     uint32_t hash;
-    size_t len;
+    size_t len = 0;
     Ns_Time wait = { 0, 0 };
 
     hash = mc_hash(key, strlen(key));
@@ -859,5 +904,117 @@ static int mc_version(mc_t *mc, mc_server_t *ms, char **data)
         return 1;
     } else {
         return 0;
+    }
+}
+
+static int mc_areplace(mc_t *mc, char* key, char *data, uint32_t data_size, uint32_t timeout, uint16_t flags, char **data2, size_t *length2, uint16_t *flags2)
+{
+    int rc, len;
+    uint32_t hash;
+    char *line, *ptr;
+    mc_server_t* ms;
+    mc_conn_t* conn;
+    struct iovec vec[3];
+    Ns_Time wait = { 0, 0 };
+
+    hash = mc_hash(key, strlen(key));
+    ms = mc_server_find_hash(mc, hash);
+    if (ms == NULL) {
+        return -1;
+    }
+    conn = mc_conn_get(ms);
+    if (conn == NULL) {
+        mc_server_dead(mc, ms);
+        return -1;
+    }
+
+    /* areplace <key> <flags> <exptime> <bytes>\r\n<data>\r\n */
+
+    Ns_DStringPrintf(&conn->ds, "areplace %s %u %u %u\r\n", key, flags, timeout, data_size);
+
+    vec[0].iov_base = conn->ds.string;
+    vec[0].iov_len  = conn->ds.length;
+
+    vec[1].iov_base = data;
+    vec[1].iov_len  = data_size;
+
+    vec[2].iov_base = "\r\n";
+    vec[2].iov_len  = 2;
+
+    wait.sec = ms->timeout;
+    rc = Ns_SockWriteV(conn->sock, vec, 3, &wait);
+    if (rc <= 0) {
+        mc_conn_free(conn);
+        mc_server_dead(mc, ms);
+        return -1;
+    }
+
+    rc = mc_conn_read(conn, BUFSIZE, 1, &line);
+    if (rc <= 0) {
+        mc_conn_free(conn);
+        mc_server_dead(mc, ms);
+        return -1;
+    }
+    mc_conn_put(conn);
+
+    if (strcmp(conn->ds.string, "NOT_STORED\r\n") == 0) {
+        return 0;
+    } else
+
+    if (strncmp(conn->ds.string, "VALUE ", 6) == 0) {
+        ptr = ns_strtok(conn->ds.string," ");
+        ptr = ns_strtok(NULL," ");
+        ptr = ns_strtok(NULL," ");
+
+        if (flags2) {
+            *flags2 = atoi(ptr);
+        }
+        ptr = ns_strtok(NULL," ");
+        if (ptr) {
+            len = atoi(ptr);
+        }
+        if (len < 0)  {
+            mc_conn_put(conn);
+            return -1;
+        }
+        if (length2) {
+            *length2 = len;
+        }
+        if (*line) {
+            memmove(conn->ds.string, line, rc - (line - conn->ds.string));
+            Ns_DStringSetLength(&conn->ds, rc - (line - conn->ds.string));
+        } else {
+            Ns_DStringSetLength(&conn->ds, 0);
+        }
+        rc = mc_conn_read(conn, len - conn->ds.length + 7, 0, 0);
+        if (rc < len) {
+            mc_conn_free(conn);
+            return -1;
+        }
+        *data2 = Ns_DStringExport(&conn->ds);
+
+        /*
+         * Cut the data buffer to correct size and move the rest back to conn
+         */
+
+        ptr = (*data2) + len;
+        Ns_DStringAppend(&conn->ds, ptr);
+        (*data2)[len] = 0;
+
+        // Read trailing \r\n and END\r\n
+        if (strncmp(conn->ds.string, "\r\n", 2)) {
+            rc = mc_conn_read(conn, BUFSIZE, 0, &line);
+        }
+        if (strstr(conn->ds.string, "END\r\n") == NULL) {
+          rc = mc_conn_read(conn, BUFSIZE, 0, &line);
+        }
+        mc_conn_put(conn);
+        return 1;
+    }
+
+    if (strncmp(conn->ds.string, "END\r\n", 5) == 0) {
+        return 0;
+    } else {
+        return -1;
     }
 }
