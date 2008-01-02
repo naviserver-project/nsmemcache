@@ -34,7 +34,7 @@
 
 #include "ns.h"
 
-#define BUFSIZE               512        /* Internal buffer size for read/write */
+#define BUFSIZE               2048       /* Internal buffer size for read/write */
 #define TIMEOUT               2          /* For how long to wait for responses */
 #define DEADTIME              5          /* Period to ping dead servers */
 
@@ -398,6 +398,7 @@ static mc_conn_t *mc_conn_create(mc_server_t *ms)
 
     sock = Ns_SockTimedConnect((char*)ms->host, ms->port, &timeout);
     if (sock == -1) {
+        Ns_Log(Error, "nsmemcache: unable to connect to %s:%d", ms->host, ms->port);
         return NULL;
     }
     Ns_SockSetNonBlocking(sock);
@@ -459,6 +460,7 @@ static int mc_conn_read(mc_conn_t * conn, int len, int reset, char **line)
         if (n <= 0) {
             break;
         }
+        // Store pointer of the second line which is data in case of get command
         if (line) {
             for (i = nread; i < n; i++) {
                 if (conn->ds.string[nread + i] == '\n') {
@@ -491,6 +493,7 @@ static void mc_server_dead(mc_t * mc, mc_server_t * ms)
     ms->status = MC_SERVER_DEAD;
     ms->deadtime = time(0);
     Ns_MutexUnlock(&ms->lock);
+    Ns_Log(Notice, "nsmemcache: server %s:%d is dead", ms->host, ms->port);
 }
 
 static int mc_server_add(mc_t *mc, mc_server_t *ms)
@@ -538,6 +541,7 @@ static mc_server_t * mc_server_find_hash(mc_t *mc, const uint32_t hash)
     mc_server_t *ms, *srv = NULL;
     uint32_t h = hash, i = 0;
     time_t now = time(0);
+    int rc;
 
     Ns_RWLockRdLock(&mc->lock);
     while (srv == NULL && i < mc->ntotal) {
@@ -551,7 +555,10 @@ static mc_server_t * mc_server_find_hash(mc_t *mc, const uint32_t hash)
         case MC_SERVER_DEAD:
            /* Try the the dead server */
            if (now - ms->deadtime > DEADTIME) {
-               if (mc_version(mc, ms, NULL) == 1) {
+               Ns_MutexUnlock(&ms->lock);
+               rc = mc_version(mc, ms, NULL);
+               Ns_MutexLock(&ms->lock);
+               if (rc == 1) {
                    ms->status = MC_SERVER_LIVE;
                    srv = ms;
                    break;
@@ -564,6 +571,9 @@ static mc_server_t * mc_server_find_hash(mc_t *mc, const uint32_t hash)
         i++;
     }
     Ns_RWLockUnlock(&mc->lock);
+    if (srv == NULL) {
+        Ns_Log(Error, "nsmemcache: no servers found");
+    }
     return srv;
 }
 
@@ -649,6 +659,7 @@ static int mc_set(mc_t *mc, char* cmd, char* key, char *data, uint32_t data_size
     if (strcmp(conn->ds.string, "NOT_STORED\r\n") == 0) {
         return 0;
     } else {
+        Ns_Log(Error, "nsmemcache: unknown response from %s:%d: %s", ms->host, ms->port, conn->ds.string);
         return -1;
     }
 }
@@ -656,11 +667,12 @@ static int mc_set(mc_t *mc, char* cmd, char* key, char *data, uint32_t data_size
 static int mc_get(mc_t *mc, char* key, char **data, size_t *length, uint16_t *flags)
 {
     int rc;
-    char *line, *ptr;
+    uint32_t hash;
     mc_server_t* ms;
     mc_conn_t* conn;
-    uint32_t hash;
-    size_t len = 0;
+    char *line = NULL;
+    const char *ptr;
+    size_t total, len = 0;
     Ns_Time wait = { 0, 0 };
 
     hash = mc_hash(key, strlen(key));
@@ -687,61 +699,49 @@ static int mc_get(mc_t *mc, char* key, char **data, size_t *length, uint16_t *fl
         return -1;
     }
 
-    /* VALUE <key> <flags> <bytes>\r\n<data block>\r\n */
+    /* VALUE <key> <flags> <bytes> [cas unique]\r\n<data block>\r\nEND\r\n */
 
     rc = mc_conn_read(conn, BUFSIZE, 1, &line);
-    if (rc <= 0) {
+    if (rc <= 0 || line == NULL) {
         mc_conn_free(conn);
         mc_server_dead(mc, ms);
         return -1;
     }
-    if (strncmp(conn->ds.string, "VALUE ", 6) == 0) {
-        ptr = ns_strtok(conn->ds.string," ");
-        ptr = ns_strtok(NULL," ");
-        ptr = ns_strtok(NULL," ");
 
+    if (strncmp(conn->ds.string, "VALUE ", 6) == 0) {
+
+        // Seek to key
+        ptr = Ns_NextWord(conn->ds.string);
+        // Seek to flags
+        ptr = Ns_NextWord(ptr);
         if (flags) {
             *flags = atoi(ptr);
         }
-        ptr = ns_strtok(NULL," ");
-        if (ptr) {
-            len = atoi(ptr);
+
+        // Seek to bytes
+        ptr = Ns_NextWord(ptr);
+        len = atoi(ptr);
+        if (length) {
+            *length = len;
         }
+
         if (len < 0)  {
             mc_conn_put(conn);
             return -1;
         }
-        if (length) {
-            *length = len;
+
+        // Calculate total response buffer size: header + data + footer
+        total = (line - conn->ds.string) + len + 7;
+        if (rc < total) {
+            rc = mc_conn_read(conn, total - rc, 0, 0);
         }
-        if (*line) {
-            memmove(conn->ds.string, line, rc - (line - conn->ds.string));
-            Ns_DStringSetLength(&conn->ds, rc - (line - conn->ds.string));
-        } else {
-            Ns_DStringSetLength(&conn->ds, 0);
-        }
-        rc = mc_conn_read(conn, len - conn->ds.length + 7, 0, 0);
-        if (rc < len) {
+        if (rc < total) {
             mc_conn_free(conn);
             return -1;
         }
-        *data = Ns_DStringExport(&conn->ds);
+        *data = ns_malloc(len + 1);
+        strncpy(*data, line, len);
 
-        /*
-         * Cut the data buffer to correct size and move the rest back to conn
-         */
-
-        ptr = (*data) + len;
-        Ns_DStringAppend(&conn->ds, ptr);
-        (*data)[len] = 0;
-
-        // Read trailing \r\n and END\r\n
-        if (strncmp(conn->ds.string, "\r\n", 2)) {
-            rc = mc_conn_read(conn, BUFSIZE, 0, &line);
-        }
-        if (strstr(conn->ds.string, "END\r\n") == NULL) {
-          rc = mc_conn_read(conn, BUFSIZE, 0, &line);
-        }
         mc_conn_put(conn);
         return 1;
     }
@@ -750,6 +750,7 @@ static int mc_get(mc_t *mc, char* key, char **data, size_t *length, uint16_t *fl
     if (strncmp(conn->ds.string, "END\r\n", 5) == 0) {
         return 0;
     } else {
+        Ns_Log(Error, "nsmemcache: unknown response from %s:%d: %s", ms->host, ms->port, conn->ds.string);
         return -1;
     }
 }
@@ -801,6 +802,7 @@ static int mc_delete(mc_t *mc, char* key, uint32_t timeout)
     if (strcmp(conn->ds.string, "NOT_FOUND\r\n") == 0) {
         return 0;
     } else {
+        Ns_Log(Error, "nsmemcache: unknown response from %s:%d: %s", ms->host, ms->port, conn->ds.string);
         return -1;
     }
 }
@@ -1015,6 +1017,7 @@ static int mc_areplace(mc_t *mc, char* key, char *data, uint32_t data_size, uint
     if (strncmp(conn->ds.string, "END\r\n", 5) == 0) {
         return 0;
     } else {
+        Ns_Log(Error, "nsmemcache: unknown response from %s:%d: %s", ms->host, ms->port, conn->ds.string);
         return -1;
     }
 }

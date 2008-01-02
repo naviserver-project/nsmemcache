@@ -9,15 +9,15 @@ memcached server
 
 
  Configuration
- 
+
    nsd.tcl
- 
-   ns_section    ns/servers/server/modules
-   ns_param      nsmemcache    		nsmemcache.so
- 
-   ns_section    ns/servers/server/module/nsmemcache
+
+   ns_section    ns/server/$server/modules
+   ns_param      nsmemcache            nsmemcache.so
+
+   ns_section    ns/server/$server/module/nsmemcache
    ns_param      server                localhost
-   ns_param	 server		       cache
+   ns_param      server                cache
 
  Usage
 
@@ -37,6 +37,6 @@ memcached server
 
 
  Authors
- 
+
      Vlad Seryakov vlad@crystalballinc.com
 
