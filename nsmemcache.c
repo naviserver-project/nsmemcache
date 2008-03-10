@@ -285,8 +285,8 @@ static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST 
 
     case cmdAReplace: {
        char *data2, *outVar = NULL, *outSize = NULL, *outFlags = NULL;
-       u_int32_t size2 = 0;
-       u_int16_t flags2 = 0;
+       uint32_t size2 = 0;
+       uint16_t flags2 = 0;
 
        Ns_ObjvSpec opts[] = {
           {"-expires",  Ns_ObjvInt,    &expires, NULL},
