@@ -672,7 +672,7 @@ static int mc_get(mc_t *mc, char* key, char **data, size_t *length, uint16_t *fl
     mc_conn_t* conn;
     char *line = NULL;
     const char *ptr;
-    size_t total, len = 0;
+    size_t offset, total, len = 0;
     Ns_Time wait = { 0, 0 };
 
     hash = mc_hash(key, strlen(key));
@@ -730,8 +730,10 @@ static int mc_get(mc_t *mc, char* key, char **data, size_t *length, uint16_t *fl
             return -1;
         }
 
+        offset = line - conn->ds.string;
+
         // Calculate total response buffer size: header + data + footer
-        total = (line - conn->ds.string) + len + 7;
+        total = offset + len + 7;
         if (rc < total) {
             rc = mc_conn_read(conn, total - rc, 0, 0);
         }
@@ -740,7 +742,7 @@ static int mc_get(mc_t *mc, char* key, char **data, size_t *length, uint16_t *fl
             return -1;
         }
         *data = ns_malloc(len + 1);
-        strncpy(*data, line, len);
+        strncpy(*data, &conn->ds.string[offset], len);
 
         mc_conn_put(conn);
         return 1;
@@ -918,6 +920,7 @@ static int mc_areplace(mc_t *mc, char* key, char *data, uint32_t data_size, uint
     mc_conn_t* conn;
     struct iovec vec[3];
     Ns_Time wait = { 0, 0 };
+    size_t offset;
 
     hash = mc_hash(key, strlen(key));
     ms = mc_server_find_hash(mc, hash);
@@ -957,6 +960,7 @@ static int mc_areplace(mc_t *mc, char* key, char *data, uint32_t data_size, uint
         mc_server_dead(mc, ms);
         return -1;
     }
+
     mc_conn_put(conn);
 
     if (strcmp(conn->ds.string, "NOT_STORED\r\n") == 0) {
@@ -983,8 +987,9 @@ static int mc_areplace(mc_t *mc, char* key, char *data, uint32_t data_size, uint
             *length2 = len;
         }
         if (*line) {
-            memmove(conn->ds.string, line, rc - (line - conn->ds.string));
-            Ns_DStringSetLength(&conn->ds, rc - (line - conn->ds.string));
+            offset = line - conn->ds.string;
+            memmove(conn->ds.string, &conn->ds.string[offset], rc - offset);
+            Ns_DStringSetLength(&conn->ds, rc - offset);
         } else {
             Ns_DStringSetLength(&conn->ds, 0);
         }
