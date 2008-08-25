@@ -193,8 +193,8 @@ static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST 
 {
     mc_t *mc = arg;
     mc_server_t *ms;
-    char *key, *data;
     uint16_t flags = 0;
+    char *key, *data = NULL;
     uint32_t size, expires = 0;
     int cmd;
 
@@ -248,6 +248,7 @@ static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST 
            }
        }
        Tcl_SetObjResult(interp, Tcl_NewIntObj(cmd));
+       ns_free(data);
        break;
 
     case cmdAdd:
@@ -284,7 +285,7 @@ static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST 
        break;
 
     case cmdAReplace: {
-       char *data2, *outVar = NULL, *outSize = NULL, *outFlags = NULL;
+       char *data2 = NULL, *outVar = NULL, *outSize = NULL, *outFlags = NULL;
        uint32_t size2 = 0;
        uint16_t flags2 = 0;
 
@@ -318,6 +319,7 @@ static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST 
              Tcl_SetVar2Ex(interp, outFlags, NULL, Tcl_NewIntObj(flags2), 0);
            }
        }
+       ns_free(data2);
        Tcl_SetObjResult(interp, Tcl_NewIntObj(cmd));
        break;
     }
@@ -370,6 +372,7 @@ static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST 
            mc_version(mc, ms, &data);
            if (data != NULL) {
                Tcl_SetObjResult(interp, Tcl_NewStringObj(data, -1));
+               ns_free(data);
            }
        }
        break;
@@ -651,17 +654,20 @@ static int mc_set(mc_t *mc, char* cmd, char* key, char *data, uint32_t data_size
         mc_server_dead(mc, ms);
         return -1;
     }
-    mc_conn_put(conn);
 
     if (strcmp(conn->ds.string, "STORED\r\n") == 0) {
+        mc_conn_put(conn);
         return 1;
-    } else
-    if (strcmp(conn->ds.string, "NOT_STORED\r\n") == 0) {
-        return 0;
-    } else {
-        Ns_Log(Error, "nsmemcache: unknown response from %s:%d: %s", ms->host, ms->port, conn->ds.string);
-        return -1;
     }
+
+    if (strcmp(conn->ds.string, "NOT_STORED\r\n") == 0) {
+        mc_conn_put(conn);
+        return 0;
+    }
+
+    Ns_Log(Error, "nsmemcache: unknown response from %s:%d: %s", ms->host, ms->port, conn->ds.string);
+    mc_conn_put(conn);
+    return -1;
 }
 
 static int mc_get(mc_t *mc, char* key, char **data, size_t *length, uint16_t *flags)
@@ -747,14 +753,15 @@ static int mc_get(mc_t *mc, char* key, char **data, size_t *length, uint16_t *fl
         mc_conn_put(conn);
         return 1;
     }
-    mc_conn_put(conn);
 
     if (strncmp(conn->ds.string, "END\r\n", 5) == 0) {
+        mc_conn_put(conn);
         return 0;
-    } else {
-        Ns_Log(Error, "nsmemcache: unknown response from %s:%d: %s", ms->host, ms->port, conn->ds.string);
-        return -1;
     }
+
+    Ns_Log(Error, "nsmemcache: unknown response from %s:%d: %s", ms->host, ms->port, conn->ds.string);
+    mc_conn_put(conn);
+    return -1;
 }
 
 static int mc_delete(mc_t *mc, char* key, uint32_t timeout)
@@ -796,17 +803,20 @@ static int mc_delete(mc_t *mc, char* key, uint32_t timeout)
         mc_server_dead(mc, ms);
         return -1;
     }
-    mc_conn_put(conn);
 
     if (strcmp(conn->ds.string, "DELETED\r\n") == 0) {
+        mc_conn_put(conn);
         return 1;
-    } else
-    if (strcmp(conn->ds.string, "NOT_FOUND\r\n") == 0) {
-        return 0;
-    } else {
-        Ns_Log(Error, "nsmemcache: unknown response from %s:%d: %s", ms->host, ms->port, conn->ds.string);
-        return -1;
     }
+
+    if (strcmp(conn->ds.string, "NOT_FOUND\r\n") == 0) {
+        mc_conn_put(conn);
+        return 0;
+    }
+
+    Ns_Log(Error, "nsmemcache: unknown response from %s:%d: %s", ms->host, ms->port, conn->ds.string);
+    mc_conn_put(conn);
+    return -1;
 }
 
 static int mc_incr(mc_t *mc, char* cmd, char* key, const int32_t inc, uint32_t *new_value)
@@ -850,19 +860,21 @@ static int mc_incr(mc_t *mc, char* cmd, char* key, const int32_t inc, uint32_t *
         mc_server_dead(mc, ms);
         return -1;
     }
-    mc_conn_put(conn);
-
     if (strcmp(conn->ds.string, "ERROR\r\n") == 0) {
+        mc_conn_put(conn);
         return -1;
-    } else
-    if (strcmp(conn->ds.string, "NOT_FOUND\r\n") == 0) {
-        return 0;
-    } else {
-        if (new_value) {
-            *new_value = atoi(conn->ds.string);
-        }
-        return 1;
     }
+
+    if (strcmp(conn->ds.string, "NOT_FOUND\r\n") == 0) {
+        mc_conn_put(conn);
+        return 0;
+    }
+
+    if (new_value) {
+        *new_value = atoi(conn->ds.string);
+    }
+    mc_conn_put(conn);
+    return 1;
 }
 
 static int mc_version(mc_t *mc, mc_server_t *ms, char **data)
@@ -899,16 +911,17 @@ static int mc_version(mc_t *mc, mc_server_t *ms, char **data)
         mc_server_dead(mc, ms);
         return -1;
     }
-    mc_conn_put(conn);
 
     if (strncmp(conn->ds.string, "VERSION ", 8) == 0) {
         if (data) {
             *data = ns_strdup(Ns_StrTrimRight(conn->ds.string+8));
         }
-        return 1;
+        rc = 1;
     } else {
-        return 0;
+        rc = 0;
     }
+    mc_conn_put(conn);
+    return rc;
 }
 
 static int mc_areplace(mc_t *mc, char* key, char *data, uint32_t data_size, uint32_t timeout, uint16_t flags, char **data2, size_t *length2, uint16_t *flags2)
@@ -961,11 +974,10 @@ static int mc_areplace(mc_t *mc, char* key, char *data, uint32_t data_size, uint
         return -1;
     }
 
-    mc_conn_put(conn);
-
     if (strcmp(conn->ds.string, "NOT_STORED\r\n") == 0) {
+        mc_conn_put(conn);
         return 0;
-    } else
+    }
 
     if (strncmp(conn->ds.string, "VALUE ", 6) == 0) {
         ptr = ns_strtok(conn->ds.string," ");
@@ -1013,16 +1025,18 @@ static int mc_areplace(mc_t *mc, char* key, char *data, uint32_t data_size, uint
             rc = mc_conn_read(conn, BUFSIZE, 0, &line);
         }
         if (strstr(conn->ds.string, "END\r\n") == NULL) {
-          rc = mc_conn_read(conn, BUFSIZE, 0, &line);
+            rc = mc_conn_read(conn, BUFSIZE, 0, &line);
         }
         mc_conn_put(conn);
         return 1;
     }
 
     if (strncmp(conn->ds.string, "END\r\n", 5) == 0) {
+        mc_conn_put(conn);
         return 0;
-    } else {
-        Ns_Log(Error, "nsmemcache: unknown response from %s:%d: %s", ms->host, ms->port, conn->ds.string);
-        return -1;
     }
+
+    Ns_Log(Error, "nsmemcache: unknown response from %s:%d: %s", ms->host, ms->port, conn->ds.string);
+    mc_conn_put(conn);
+    return -1;
 }
