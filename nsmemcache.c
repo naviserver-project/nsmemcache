@@ -641,7 +641,8 @@ static int mc_set(mc_t *mc, char* cmd, char* key, char *data, uint32_t data_size
     vec[2].iov_len  = 2;
 
     wait.sec = ms->timeout;
-    rc = Ns_SockWriteV(conn->sock, vec, 3, &wait);
+    wait.usec = 0;
+    rc = Ns_SockSendBufs(conn->sock, vec, 3, &wait, 0);
     if (rc <= 0) {
         mc_conn_free(conn);
         mc_server_dead(mc, ms);
@@ -697,7 +698,8 @@ static int mc_get(mc_t *mc, char* key, char **data, size_t *length, uint16_t *fl
     Ns_DStringPrintf(&conn->ds, "get %s\r\n", key);
 
     wait.sec = ms->timeout;
-    rc = Ns_SockWrite(conn->sock, conn->ds.string, conn->ds.length, &wait);
+    wait.usec = 0;
+    rc = Ns_SockSend(conn->sock, conn->ds.string, conn->ds.length, &wait);
 
     if (rc <= 0) {
         mc_conn_free(conn);
@@ -789,7 +791,8 @@ static int mc_delete(mc_t *mc, char* key, uint32_t timeout)
     Ns_DStringPrintf(&conn->ds, "delete %s %u\r\n", key, timeout);
 
     wait.sec = ms->timeout;
-    rc = Ns_SockWrite(conn->sock, conn->ds.string, conn->ds.length, &wait);
+    wait.usec = 0;
+    rc = Ns_SockSend(conn->sock, conn->ds.string, conn->ds.length, &wait);
 
     if (rc <= 0) {
         mc_conn_free(conn);
@@ -844,7 +847,8 @@ static int mc_incr(mc_t *mc, char* cmd, char* key, const int32_t inc, uint32_t *
     Ns_DStringPrintf(&conn->ds, "%s %s %u\r\n", cmd, key, inc);
 
     wait.sec = ms->timeout;
-    rc = Ns_SockWrite(conn->sock, conn->ds.string, conn->ds.length, &wait);
+    wait.usec = 0;
+    rc = Ns_SockSend(conn->sock, conn->ds.string, conn->ds.length, &wait);
 
     if (rc <= 0) {
         mc_conn_free(conn);
@@ -895,7 +899,8 @@ static int mc_version(mc_t *mc, mc_server_t *ms, char **data)
     Ns_DStringPrintf(&conn->ds, "version\r\n");
 
     wait.sec = ms->timeout;
-    rc = Ns_SockWrite(conn->sock, conn->ds.string, conn->ds.length, &wait);
+    wait.usec = 0;
+    rc = Ns_SockSend(conn->sock, conn->ds.string, conn->ds.length, &wait);
 
     if (rc <= 0) {
         mc_conn_free(conn);
@@ -960,7 +965,8 @@ static int mc_areplace(mc_t *mc, char* key, char *data, uint32_t data_size, uint
     vec[2].iov_len  = 2;
 
     wait.sec = ms->timeout;
-    rc = Ns_SockWriteV(conn->sock, vec, 3, &wait);
+    wait.usec = 0;
+    rc = Ns_SockSendBufs(conn->sock, vec, 3, &wait, 0);
     if (rc <= 0) {
         mc_conn_free(conn);
         mc_server_dead(mc, ms);
