@@ -84,8 +84,9 @@ static int mc_areplace(mc_t *mc, char* key, char *data, uint32_t data_size, uint
 static int mc_delete(mc_t *mc, char* key, uint32_t timeout);
 static int mc_incr(mc_t *mc, char *cmd, char* key, int32_t n, uint32_t *new_value);
 static int mc_version(mc_t *mc, mc_server_t *ms,  char **data);
-static int MCInterpInit(Tcl_Interp * interp, void *arg);
 static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST objv[]);
+
+static Ns_TclTraceProc MCInterpInit;
 
 /* The crc32 functions and data was originally written by Spencer
  * Garrett <srg@quick.com> and was cleaned from the PostgreSQL source
@@ -163,7 +164,8 @@ static const uint32_t crc32tab[256] = {
 NS_EXPORT int Ns_ModuleInit(char *server, char *module)
 {
     int i;
-    char *key, *path;
+    char *key;
+    const char *path;    
     mc_t *mc;
     Ns_Set *set;
 
@@ -183,9 +185,9 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
     return NS_OK;
 }
 
-static int MCInterpInit(Tcl_Interp * interp, void *arg)
+static int MCInterpInit(Tcl_Interp * interp, const void *arg)
 {
-    Tcl_CreateObjCommand(interp, "ns_memcache", MCCmd, arg, NULL);
+    Tcl_CreateObjCommand(interp, "ns_memcache", MCCmd, (ClientData)arg, NULL);
     return NS_OK;
 }
 
@@ -195,7 +197,8 @@ static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST 
     mc_server_t *ms;
     uint16_t flags = 0;
     char *key, *data = NULL;
-    uint32_t size, expires = 0;
+    uint32_t expires = 0;
+    size_t size;
     int cmd;
 
     enum {
@@ -208,7 +211,7 @@ static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST 
         "server",
         0
     };
-
+    
     if (objc < 2) {
         Tcl_WrongNumArgs(interp, 1, objv, "cmd args");
         return TCL_ERROR;
@@ -286,7 +289,7 @@ static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST 
 
     case cmdAReplace: {
        char *data2 = NULL, *outVar = NULL, *outSize = NULL, *outFlags = NULL;
-       uint32_t size2 = 0;
+       size_t size2 = 0;
        uint16_t flags2 = 0;
 
        Ns_ObjvSpec opts[] = {
@@ -338,26 +341,28 @@ static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST 
        break;
 
     case cmdIncr:
-    case cmdDecr:
+    case cmdDecr: {
+       uint32_t s;
        if (objc < 4) {
            Tcl_WrongNumArgs(interp, 2, objv, "key value ?varname?");
            return TCL_ERROR;
        }
        key = Tcl_GetString(objv[2]);
-       size = atoi(Tcl_GetString(objv[3]));
+       s = atoi(Tcl_GetString(objv[3]));
        switch (cmd) {
        case cmdIncr:
-           cmd = mc_incr(mc, "incr", key, size, &size);
+           cmd = mc_incr(mc, "incr", key, s, &s);
            break;
        case cmdDecr:
-           cmd = mc_incr(mc, "decr", key, size, &size);
+           cmd = mc_incr(mc, "decr", key, s, &s);
            break;
        }
        if (cmd == 1 && objc > 4) {
-           Tcl_SetVar2Ex(interp, Tcl_GetString(objv[4]), NULL, Tcl_NewLongObj(size), 0);
+           Tcl_SetVar2Ex(interp, Tcl_GetString(objv[4]), NULL, Tcl_NewLongObj(s), 0);
        }
        Tcl_SetObjResult(interp, Tcl_NewIntObj(cmd));
        break;
+    }
 
     case cmdVersion:
        if (mc->ntotal == 0) {
@@ -642,7 +647,7 @@ static int mc_set(mc_t *mc, char* cmd, char* key, char *data, uint32_t data_size
 
     wait.sec = ms->timeout;
     wait.usec = 0;
-    rc = Ns_SockSendBufs(conn->sock, vec, 3, &wait, 0);
+    rc = Ns_SockSendBufs(conn-sock, vec, 3, &wait, 0);
     if (rc <= 0) {
         mc_conn_free(conn);
         mc_server_dead(mc, ms);

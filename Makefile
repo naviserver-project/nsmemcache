@@ -10,7 +10,7 @@ MOD      =  nsmemcache.so
 #
 # Objects to build.
 #
-OBJS     = nsmemcache.o
+MODOBJS     = nsmemcache.o
 
 include  $(NAVISERVER)/include/Makefile.module
 
