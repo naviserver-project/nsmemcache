@@ -55,9 +55,9 @@ typedef struct mc_conn_t
 typedef struct mc_server_t
 {
     char *host;                          /*  Hostname of this server */
-    int port;                            /*  Port of this server */
+    unsigned short port;                 /*  Port of this server */
     int status;                          /*  Server status */
-    int timeout;
+    uint32_t timeout;
     mc_conn_t *conns;                    /*  List of actual client connections */
     Ns_Mutex lock;
     time_t deadtime;
@@ -73,20 +73,23 @@ typedef struct mc_t
 
 static uint32_t mc_hash(const char* data, uint32_t data_len);
 static mc_t *mc_create(uint16_t max_servers, uint32_t flags);
-static mc_server_t *mc_server_create(char *host, int port, uint32_t timeout);
+static mc_server_t *mc_server_create(char *host, unsigned short port, uint32_t timeout);
 static mc_server_t * mc_server_find(mc_t *mc, char* host, int port);
 static int mc_server_add(mc_t *mc, mc_server_t *ms);
 static void mc_server_delete(mc_t *mc, mc_server_t *ms);
-static int mc_get(mc_t *mc, char* key, char **data, size_t *length, uint16_t *flags);
-static int mc_set(mc_t *mc, char* cmd, char* key, char *data, uint32_t data_size, uint32_t timeout, uint16_t flags);
+static int mc_get(mc_t *mc, const char* key, char **data, size_t *length, uint16_t *flags);
+static int mc_set(mc_t *mc, const char* cmd, char* key, char *data, uint32_t data_size, uint32_t timeout, uint16_t flags);
 static int mc_areplace(mc_t *mc, char* key, char *data, uint32_t data_size, uint32_t timeout, uint16_t flags,
                        char **data2, size_t *length2, uint16_t *flags2);
 static int mc_delete(mc_t *mc, char* key, uint32_t timeout);
-static int mc_incr(mc_t *mc, char *cmd, char* key, int32_t n, uint32_t *new_value);
-static int mc_version(mc_t *mc, mc_server_t *ms,  char **data);
+static int mc_incr(mc_t *mc, const char *cmd, char* key, uint32_t n, uint32_t *new_value);
+static ssize_t mc_version(mc_t *mc, mc_server_t *ms,  char **data);
 static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST objv[]);
+static ssize_t SockSendBufs(NS_SOCKET sock, const struct iovec *bufs, int nbufs,
+                            const Ns_Time *UNUSED(timeoutPtr), unsigned int flags);
 
 static Ns_TclTraceProc MCInterpInit;
+NS_EXPORT Ns_ModuleInitProc Ns_ModuleInit;
 
 /* The crc32 functions and data was originally written by Spencer
  * Garrett <srg@quick.com> and was cleaned from the PostgreSQL source
@@ -163,11 +166,11 @@ static const uint32_t crc32tab[256] = {
 
 NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
 {
-    int i;
-    char *key;
+    size_t      i;
+    char       *key;
     const char *path;    
-    mc_t *mc;
-    Ns_Set *set;
+    mc_t       *mc;
+    Ns_Set     *set;
 
     mc = mc_create(16, 0);
 
@@ -195,9 +198,9 @@ static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST 
 {
     mc_t *mc = arg;
     mc_server_t *ms;
-    uint16_t flags = 0;
+    uint16_t flags = 0u;
     char *key, *data = NULL;
-    uint32_t expires = 0;
+    uint32_t expires = 0u;
     size_t size;
     int cmd;
 
@@ -242,9 +245,9 @@ static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST 
        key = Tcl_GetString(objv[2]);
        cmd = mc_get(mc, key, &data, &size, &flags);
        if (cmd == 1) {
-           Tcl_SetVar2Ex(interp, Tcl_GetString(objv[3]), NULL, Tcl_NewByteArrayObj((uint8_t*)data, size), 0);
+           Tcl_SetVar2Ex(interp, Tcl_GetString(objv[3]), NULL, Tcl_NewByteArrayObj((uint8_t*)data, (int)size), 0);
            if (objc > 4) {
-             Tcl_SetVar2Ex(interp, Tcl_GetString(objv[4]), NULL, Tcl_NewLongObj(size), 0);
+             Tcl_SetVar2Ex(interp, Tcl_GetString(objv[4]), NULL, Tcl_NewLongObj((long)size), 0);
            }
            if (objc > 5) {
              Tcl_SetVar2Ex(interp, Tcl_GetString(objv[5]), NULL, Tcl_NewIntObj(flags), 0);
@@ -265,23 +268,23 @@ static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST 
        key = Tcl_GetString(objv[2]);
        data = (char*)Tcl_GetByteArrayFromObj(objv[3], (int*)&size);
        if (objc > 4) {
-           expires = atoi(Tcl_GetString(objv[4]));
+           expires = (uint32_t)strtol(Tcl_GetString(objv[4]), NULL, 10);
        }
        if (objc > 5) {
-           flags = atoi(Tcl_GetString(objv[5]));
+           flags = (uint16_t)strtol(Tcl_GetString(objv[5]), NULL, 10);
        }
        switch (cmd) {
        case cmdAdd:
-           cmd = mc_set(mc, "add", key, data, size, expires, flags);
+           cmd = mc_set(mc, "add", key, data, (uint32_t)size, expires, flags);
            break;
        case cmdAppend:
-           cmd = mc_set(mc, "append", key, data, size, expires, flags);
+           cmd = mc_set(mc, "append", key, data, (uint32_t)size, expires, flags);
            break;
        case cmdSet:
-           cmd = mc_set(mc, "set", key, data, size, expires, flags);
+           cmd = mc_set(mc, "set", key, data, (uint32_t)size, expires, flags);
            break;
        case cmdReplace:
-           cmd = mc_set(mc, "replace", key, data, size, expires, flags);
+           cmd = mc_set(mc, "replace", key, data, (uint32_t)size, expires, flags);
            break;
        }
        Tcl_SetObjResult(interp, Tcl_NewIntObj(cmd));
@@ -310,13 +313,13 @@ static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST 
        if (Ns_ParseObjv(opts, args, interp, 2, objc, objv) != NS_OK) {
            return TCL_ERROR;
        }
-       cmd = mc_areplace(mc, key, data, size, expires, flags, &data2, &size2, &flags2);
+       cmd = mc_areplace(mc, key, data, (uint32_t)size, expires, flags, &data2, &size2, &flags2);
        if (cmd == 1) {
            if (outVar != NULL) {
-               Tcl_SetVar2Ex(interp, outVar, NULL, Tcl_NewByteArrayObj((uint8_t*)data2, size2), 0);
+               Tcl_SetVar2Ex(interp, outVar, NULL, Tcl_NewByteArrayObj((uint8_t*)data2, (int)size2), 0);
            }
            if (outSize != NULL) {
-             Tcl_SetVar2Ex(interp, outSize, NULL, Tcl_NewLongObj(size2), 0);
+               Tcl_SetVar2Ex(interp, outSize, NULL, Tcl_NewLongObj((long)size2), 0);
            }
            if (outFlags != NULL) {
              Tcl_SetVar2Ex(interp, outFlags, NULL, Tcl_NewIntObj(flags2), 0);
@@ -334,7 +337,7 @@ static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST 
        }
        key = Tcl_GetString(objv[2]);
        if (objc > 3) {
-           expires = atoi(Tcl_GetString(objv[3]));
+           expires = (uint32_t)strtol(Tcl_GetString(objv[3]), NULL, 10);
        }
        cmd = mc_delete(mc, key, expires);
        Tcl_SetObjResult(interp, Tcl_NewIntObj(cmd));
@@ -348,7 +351,7 @@ static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST 
            return TCL_ERROR;
        }
        key = Tcl_GetString(objv[2]);
-       s = atoi(Tcl_GetString(objv[3]));
+       s = (uint32_t)strtol(Tcl_GetString(objv[3]), NULL, 10);
        switch (cmd) {
        case cmdIncr:
            cmd = mc_incr(mc, "incr", key, s, &s);
@@ -386,15 +389,55 @@ static int MCCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST 
     return TCL_OK;
 }
 
+static ssize_t
+SockSendBufs(NS_SOCKET sock, const struct iovec *bufs, int nbufs,
+         const Ns_Time *UNUSED(timeoutPtr), unsigned int flags)
+{
+    ssize_t   n;
+
+    {
+#ifdef _WIN32
+        DWORD bytesReceived;
+        int   rc;
+
+        rc = WSASend(sock, (LPWSABUF)bufs, nbufs, &bytesReceived, flags,
+                     NULL, NULL);
+        
+        if (rc == 0) {
+            n = bytesReceived;
+        } else {
+            n = -1;
+        }
+#else
+        struct msghdr msg;
+      
+        memset(&msg, 0, sizeof(msg));
+        msg.msg_iov = (struct iovec *)bufs;
+        msg.msg_iovlen = (NS_MSG_IOVLEN_T)nbufs;    
+
+        n = sendmsg(sock, &msg, (int)flags);
+    
+        if (n < 0) {
+            Ns_Log(Debug, "SockSend: %s",
+                   ns_sockstrerror(ns_sockerrno));
+        }
+#endif
+    }
+
+    return n;
+}
+
+
 static uint32_t mc_hash(const char* data, const uint32_t data_len)
 {
     uint32_t i;
     uint32_t crc;
-    crc = ~0;
+    
+    crc = ~0u;
 
-    for (i = 0; i < data_len; i++)
-        crc = (crc >> 8) ^ crc32tab[(crc ^ (data[i])) & 0xff];
-
+    for (i = 0; i < data_len; i++) {
+        crc = (crc >> 8) ^ crc32tab[(crc ^ (UCHAR(data[i]))) & 0xff];
+    }
     return ((~crc >> 16) & 0x7fff);
 }
 
@@ -455,7 +498,8 @@ static void mc_conn_put(mc_conn_t * conn)
 
 static int mc_conn_read(mc_conn_t * conn, int len, int reset, char **line)
 {
-    int nread, n, i;
+    int nread, i;
+    ssize_t n;
     Ns_Time timeout = { conn->ms->timeout, 0 };
 
     if (reset) {
@@ -464,7 +508,7 @@ static int mc_conn_read(mc_conn_t * conn, int len, int reset, char **line)
     nread = conn->ds.length;
     Ns_DStringSetLength(&conn->ds, nread + len);
     while (len > 0) {
-        n = Ns_SockRecv(conn->sock, conn->ds.string + nread, len, &timeout);
+        n = Ns_SockRecv(conn->sock, conn->ds.string + nread, (size_t)len, &timeout);
         if (n <= 0) {
             break;
         }
@@ -485,7 +529,7 @@ static int mc_conn_read(mc_conn_t * conn, int len, int reset, char **line)
     return nread;
 }
 
-static mc_server_t *mc_server_create(char* host, int port, uint32_t timeout)
+static mc_server_t *mc_server_create(char* host, unsigned short port, uint32_t timeout)
 {
     mc_server_t *server = ns_calloc(1, sizeof(mc_server_t));
     server->host = ns_strdup(host);
@@ -495,7 +539,7 @@ static mc_server_t *mc_server_create(char* host, int port, uint32_t timeout)
     return server;
 }
 
-static void mc_server_dead(mc_t * mc, mc_server_t * ms)
+static void mc_server_dead(mc_t * UNUSED(mc), mc_server_t * ms)
 {
     Ns_MutexLock(&ms->lock);
     ms->status = MC_SERVER_DEAD;
@@ -549,7 +593,6 @@ static mc_server_t * mc_server_find_hash(mc_t *mc, const uint32_t hash)
     mc_server_t *ms, *srv = NULL;
     uint32_t h = hash, i = 0;
     time_t now = time(0);
-    int rc;
 
     Ns_RWLockRdLock(&mc->lock);
     while (srv == NULL && i < mc->ntotal) {
@@ -563,6 +606,8 @@ static mc_server_t * mc_server_find_hash(mc_t *mc, const uint32_t hash)
         case MC_SERVER_DEAD:
            /* Try the the dead server */
            if (now - ms->deadtime > DEADTIME) {
+               ssize_t rc;
+
                Ns_MutexUnlock(&ms->lock);
                rc = mc_version(mc, ms, NULL);
                Ns_MutexLock(&ms->lock);
@@ -602,7 +647,7 @@ static mc_server_t * mc_server_find(mc_t *mc, char* host, int port)
     return ms;
 }
 
-static mc_t *mc_create(uint16_t max_servers, uint32_t flags)
+static mc_t *mc_create(uint16_t max_servers, uint32_t UNUSED(flags))
 {
     mc_t *mc = ns_calloc(1, sizeof(mc_t));
     mc->nalloc = max_servers;
@@ -611,9 +656,9 @@ static mc_t *mc_create(uint16_t max_servers, uint32_t flags)
     return mc;
 }
 
-static int mc_set(mc_t *mc, char* cmd, char* key, char *data, uint32_t data_size, uint32_t timeout, uint16_t flags)
+static int mc_set(mc_t *mc, const char* cmd, char* key, char *data, uint32_t data_size, uint32_t timeout, uint16_t flags)
 {
-    int rc;
+    ssize_t rc;
     char *line;
     uint32_t hash;
     mc_server_t* ms;
@@ -621,7 +666,7 @@ static int mc_set(mc_t *mc, char* cmd, char* key, char *data, uint32_t data_size
     struct iovec vec[3];
     Ns_Time wait = { 0, 0 };
 
-    hash = mc_hash(key, strlen(key));
+    hash = mc_hash(key, (uint32_t)strlen(key));
     ms = mc_server_find_hash(mc, hash);
     if (ms == NULL) {
         return -1;
@@ -637,17 +682,17 @@ static int mc_set(mc_t *mc, char* cmd, char* key, char *data, uint32_t data_size
     Ns_DStringPrintf(&conn->ds, "%s %s %u %u %u\r\n", cmd, key, flags, timeout, data_size);
 
     vec[0].iov_base = conn->ds.string;
-    vec[0].iov_len  = conn->ds.length;
+    vec[0].iov_len  = (size_t)conn->ds.length;
 
     vec[1].iov_base = data;
     vec[1].iov_len  = data_size;
 
-    vec[2].iov_base = "\r\n";
+    vec[2].iov_base = (void*)"\r\n";
     vec[2].iov_len  = 2;
 
     wait.sec = ms->timeout;
     wait.usec = 0;
-    rc = Ns_SockSendBufs(conn-sock, vec, 3, &wait, 0);
+    rc = SockSendBufs(conn->sock, vec, 3, &wait, 0u);
     if (rc <= 0) {
         mc_conn_free(conn);
         mc_server_dead(mc, ms);
@@ -676,18 +721,18 @@ static int mc_set(mc_t *mc, char* cmd, char* key, char *data, uint32_t data_size
     return -1;
 }
 
-static int mc_get(mc_t *mc, char* key, char **data, size_t *length, uint16_t *flags)
+static int mc_get(mc_t *mc, const char* key, char **data, size_t *length, uint16_t *flags)
 {
-    int rc;
+    ssize_t rc;
     uint32_t hash;
     mc_server_t* ms;
     mc_conn_t* conn;
     char *line = NULL;
     const char *ptr;
-    size_t offset, total, len = 0;
+    size_t offset, total;
     Ns_Time wait = { 0, 0 };
 
-    hash = mc_hash(key, strlen(key));
+    hash = mc_hash(key, (uint32_t)strlen(key));
     ms = mc_server_find_hash(mc, hash);
     if (ms == NULL) {
         return -1;
@@ -704,7 +749,7 @@ static int mc_get(mc_t *mc, char* key, char **data, size_t *length, uint16_t *fl
 
     wait.sec = ms->timeout;
     wait.usec = 0;
-    rc = Ns_SockSend(conn->sock, conn->ds.string, conn->ds.length, &wait);
+    rc = Ns_SockSend(conn->sock, conn->ds.string, (size_t)conn->ds.length, &wait);
 
     if (rc <= 0) {
         mc_conn_free(conn);
@@ -722,20 +767,21 @@ static int mc_get(mc_t *mc, char* key, char **data, size_t *length, uint16_t *fl
     }
 
     if (strncmp(conn->ds.string, "VALUE ", 6) == 0) {
-
+        long len;
+        
         // Seek to key
         ptr = Ns_NextWord(conn->ds.string);
         // Seek to flags
         ptr = Ns_NextWord(ptr);
         if (flags) {
-            *flags = atoi(ptr);
+            *flags = (uint16_t)strtol(ptr, NULL, 10);
         }
 
         // Seek to bytes
         ptr = Ns_NextWord(ptr);
-        len = atoi(ptr);
+        len = strtol(ptr, NULL, 10);
         if (length) {
-            *length = len;
+            *length = (size_t)len;
         }
 
         if (len < 0)  {
@@ -743,18 +789,18 @@ static int mc_get(mc_t *mc, char* key, char **data, size_t *length, uint16_t *fl
             return -1;
         }
 
-        offset = line - conn->ds.string;
+        offset = (size_t)(line - conn->ds.string);
 
         // Calculate total response buffer size: header + data + footer
-        total = offset + len + 7;
-        if (rc < total) {
-            rc = mc_conn_read(conn, total - rc, 0, 0);
+        total = offset + (size_t)len + 7u;
+        if (rc < (ssize_t)total) {
+            rc = mc_conn_read(conn, (int)((ssize_t)total - rc), 0, 0);
         }
-        if (rc < total) {
+        if (rc < (ssize_t)total) {
             mc_conn_free(conn);
             return -1;
         }
-        *data = ns_malloc(len + 1);
+        *data = ns_malloc((size_t)len + 1);
         strncpy(*data, &conn->ds.string[offset], len);
 
         mc_conn_put(conn);
@@ -773,14 +819,14 @@ static int mc_get(mc_t *mc, char* key, char **data, size_t *length, uint16_t *fl
 
 static int mc_delete(mc_t *mc, char* key, uint32_t timeout)
 {
-    int rc;
+    ssize_t rc;
     char *line;
     mc_server_t* ms;
     mc_conn_t* conn;
     uint32_t hash;
     Ns_Time wait = { 0, 0 };
 
-    hash = mc_hash(key, strlen(key));
+    hash = mc_hash(key, (uint32_t)strlen(key));
     ms = mc_server_find_hash(mc, hash);
     if (ms == NULL) {
         return -1;
@@ -797,7 +843,7 @@ static int mc_delete(mc_t *mc, char* key, uint32_t timeout)
 
     wait.sec = ms->timeout;
     wait.usec = 0;
-    rc = Ns_SockSend(conn->sock, conn->ds.string, conn->ds.length, &wait);
+    rc = Ns_SockSend(conn->sock, conn->ds.string, (size_t)conn->ds.length, &wait);
 
     if (rc <= 0) {
         mc_conn_free(conn);
@@ -827,16 +873,16 @@ static int mc_delete(mc_t *mc, char* key, uint32_t timeout)
     return -1;
 }
 
-static int mc_incr(mc_t *mc, char* cmd, char* key, const int32_t inc, uint32_t *new_value)
+static int mc_incr(mc_t *mc, const char* cmd, char* key, const uint32_t inc, uint32_t *new_value)
 {
-    int rc;
+    ssize_t rc;
     char *line;
     mc_server_t* ms;
     mc_conn_t* conn;
     uint32_t hash;
     Ns_Time wait = { 0, 0 };
 
-    hash = mc_hash(key, strlen(key));
+    hash = mc_hash(key, (uint32_t)strlen(key));
     ms = mc_server_find_hash(mc, hash);
     if (ms == NULL) {
         return -1;
@@ -853,7 +899,7 @@ static int mc_incr(mc_t *mc, char* cmd, char* key, const int32_t inc, uint32_t *
 
     wait.sec = ms->timeout;
     wait.usec = 0;
-    rc = Ns_SockSend(conn->sock, conn->ds.string, conn->ds.length, &wait);
+    rc = Ns_SockSend(conn->sock, conn->ds.string, (size_t)conn->ds.length, &wait);
 
     if (rc <= 0) {
         mc_conn_free(conn);
@@ -879,16 +925,17 @@ static int mc_incr(mc_t *mc, char* cmd, char* key, const int32_t inc, uint32_t *
         return 0;
     }
 
-    if (new_value) {
-        *new_value = atoi(conn->ds.string);
+    if (new_value != NULL) {
+        *new_value = (uint32_t)strtol(conn->ds.string, NULL, 10);
     }
     mc_conn_put(conn);
     return 1;
 }
 
-static int mc_version(mc_t *mc, mc_server_t *ms, char **data)
+
+static ssize_t mc_version(mc_t *mc, mc_server_t *ms, char **data)
 {
-    int rc;
+    ssize_t rc;
     char *line;
     mc_conn_t* conn;
     Ns_Time wait = { 0, 0 };
@@ -905,7 +952,7 @@ static int mc_version(mc_t *mc, mc_server_t *ms, char **data)
 
     wait.sec = ms->timeout;
     wait.usec = 0;
-    rc = Ns_SockSend(conn->sock, conn->ds.string, conn->ds.length, &wait);
+    rc = Ns_SockSend(conn->sock, conn->ds.string, (size_t)conn->ds.length, &wait);
 
     if (rc <= 0) {
         mc_conn_free(conn);
@@ -934,9 +981,12 @@ static int mc_version(mc_t *mc, mc_server_t *ms, char **data)
     return rc;
 }
 
+
+
 static int mc_areplace(mc_t *mc, char* key, char *data, uint32_t data_size, uint32_t timeout, uint16_t flags, char **data2, size_t *length2, uint16_t *flags2)
 {
-    int rc, len;
+    ssize_t rc;
+    long len;
     uint32_t hash;
     char *line, *ptr;
     mc_server_t* ms;
@@ -945,7 +995,7 @@ static int mc_areplace(mc_t *mc, char* key, char *data, uint32_t data_size, uint
     Ns_Time wait = { 0, 0 };
     size_t offset;
 
-    hash = mc_hash(key, strlen(key));
+    hash = mc_hash(key, (uint32_t)strlen(key));
     ms = mc_server_find_hash(mc, hash);
     if (ms == NULL) {
         return -1;
@@ -961,17 +1011,17 @@ static int mc_areplace(mc_t *mc, char* key, char *data, uint32_t data_size, uint
     Ns_DStringPrintf(&conn->ds, "areplace %s %u %u %u\r\n", key, flags, timeout, data_size);
 
     vec[0].iov_base = conn->ds.string;
-    vec[0].iov_len  = conn->ds.length;
+    vec[0].iov_len  = (size_t)conn->ds.length;
 
     vec[1].iov_base = data;
     vec[1].iov_len  = data_size;
 
-    vec[2].iov_base = "\r\n";
-    vec[2].iov_len  = 2;
+    vec[2].iov_base = (void*)"\r\n";
+    vec[2].iov_len  = 2u;
 
     wait.sec = ms->timeout;
     wait.usec = 0;
-    rc = Ns_SockSendBufs(conn->sock, vec, 3, &wait, 0);
+    rc = SockSendBufs(conn->sock, vec, 3, &wait, 0u);
     if (rc <= 0) {
         mc_conn_free(conn);
         mc_server_dead(mc, ms);
@@ -996,27 +1046,29 @@ static int mc_areplace(mc_t *mc, char* key, char *data, uint32_t data_size, uint
         ptr = ns_strtok(NULL," ");
 
         if (flags2) {
-            *flags2 = atoi(ptr);
+            *flags2 = (uint16_t)strtol(ptr, NULL, 10);
         }
         ptr = ns_strtok(NULL," ");
         if (ptr) {
-            len = atoi(ptr);
+            len = strtol(ptr, NULL, 10);
+        } else {
+            len = -1;
         }
         if (len < 0)  {
             mc_conn_put(conn);
             return -1;
         }
-        if (length2) {
-            *length2 = len;
+        if (length2 != NULL) {
+            *length2 = (size_t)len;
         }
         if (*line) {
-            offset = line - conn->ds.string;
-            memmove(conn->ds.string, &conn->ds.string[offset], rc - offset);
-            Ns_DStringSetLength(&conn->ds, rc - offset);
+            offset = (size_t)(line - conn->ds.string);
+            memmove(conn->ds.string, &conn->ds.string[offset], rc - (int)offset);
+            Ns_DStringSetLength(&conn->ds, (int)(rc - (long)offset));
         } else {
             Ns_DStringSetLength(&conn->ds, 0);
         }
-        rc = mc_conn_read(conn, len - conn->ds.length + 7, 0, 0);
+        rc = mc_conn_read(conn, (int)len - conn->ds.length + 7, 0, 0);
         if (rc < len) {
             mc_conn_free(conn);
             return -1;
@@ -1051,3 +1103,11 @@ static int mc_areplace(mc_t *mc, char* key, char *data, uint32_t data_size, uint
     mc_conn_put(conn);
     return -1;
 }
+/*
+ * Local Variables:
+ * mode: c
+ * c-basic-offset: 4
+ * fill-column: 78
+ * indent-tabs-mode: nil
+ * End:
+ */
