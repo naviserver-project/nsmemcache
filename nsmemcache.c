@@ -89,6 +89,8 @@ static ssize_t SockSendBufs(NS_SOCKET sock, const struct iovec *bufs, int nbufs,
                             const Ns_Time *UNUSED(timeoutPtr), unsigned int flags);
 
 static Ns_TclTraceProc MCInterpInit;
+
+NS_EXPORT int Ns_ModuleVersion = 1;
 NS_EXPORT Ns_ModuleInitProc Ns_ModuleInit;
 
 /* The crc32 functions and data was originally written by Spencer
@@ -604,7 +606,7 @@ static mc_server_t * mc_server_find_hash(mc_t *mc, const uint32_t hash)
            break;
 
         case MC_SERVER_DEAD:
-           /* Try the the dead server */
+           /* Try the dead server */
            if (now - ms->deadtime > DEADTIME) {
                ssize_t rc;
 
