@@ -3,8 +3,10 @@ Release 0.1
 vlad@crystalballinc.com
 
 This is NaviServer module that implements client protocol to communicate with
-memcached server
+memcached server.
 
+
+````
 /*--------------------------------------------------------------------*/
 
 
@@ -34,7 +36,7 @@ memcached server
    ns_memcache incr key value ?varname?
 
    ns_memcache decr key value ?varname?
-
+````
 
  Authors
 
