@@ -166,7 +166,7 @@ static const uint32_t crc32tab[256] = {
   0xb40bbe37, 0xc30c8ea1, 0x5a05df1b, 0x2d02ef8d,
 };
 
-NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
+NS_EXPORT Ns_ReturnCode Ns_ModuleInit(const char *server, const char *module)
 {
     size_t      i;
     char       *key;
@@ -190,7 +190,7 @@ NS_EXPORT int Ns_ModuleInit(const char *server, const char *module)
     return NS_OK;
 }
 
-static int MCInterpInit(Tcl_Interp * interp, const void *arg)
+static Ns_ReturnCode MCInterpInit(Tcl_Interp * interp, const void *arg)
 {
     Tcl_CreateObjCommand(interp, "ns_memcache", MCCmd, (ClientData)arg, NULL);
     return NS_OK;
